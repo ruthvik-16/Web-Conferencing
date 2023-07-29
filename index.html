@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video Conferencing App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 0;
+        }
+
+        #container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+
+        p {
+            color: #666;
+            text-align: center;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+
+        #join, #leave {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            background-color: #007bff;
+            color: #fff;
+            border: none;
+            cursor: pointer;
+        }
+
+        #join:disabled, #leave:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        #active_users {
+            list-style: none;
+            padding: 0;
+        }
+
+        #videos {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        video {
+            max-width: 600px;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>Welcome to the Video Conferencing App</h1>
+        <p>Enter your username and room ID to join the conference.</p>
+        <input type="text" id="username" placeholder="Enter your username">
+        <input type="text" id="room_id" placeholder="Enter the room ID">
+        <button onclick="joinRoom()" id="join">Join Room</button>
+        <button onclick="leaveRoom()" id="leave" disabled>Leave Room</button>
+
+        <h2>Active Users in Room:</h2>
+        <ul id="active_users"></ul>
+
+        <h2>Video Stream:</h2>
+        <div id="videos"></div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.2.0/socket.io.js"></script>
+    <script>
+        var socket = io.connect();
+        var peerConnections = {};
+        var localStream;
+        var joinedRoom = false; // Flag to track if user has joined a room
+
+        function joinRoom() {
+            var username = document.getElementById('username').value;
+            var room_id = document.getElementById('room_id').value;
+
+            socket.emit('join_room', { 'username': username, 'room_id': room_id }); // Send room_id
+
+            navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+                .then(function (stream) {
+                    localStream = stream;
+                    var video = document.createElement('video');
+                    video.srcObject = stream;
+                    video.play();
+                    document.getElementById('videos').appendChild(video);
+
+                    peerConnections[socket.id] = new RTCPeerConnection();
+                    peerConnections[socket.id].addStream(stream);
+
+                    peerConnections[socket.id].onicecandidate = function (event) {
+                        if (event.candidate) {
+                            socket.emit('sdp', {
+                                'type': 'candidate',
+                                'candidate': event.candidate,
+                                'pc_id': socket.id,
+                                'room_id': room_id, // Send room_id
+                                'username': username
+                            });
+                        }
+                    };
+
+                    peerConnections[socket.id].createOffer().then(function (desc) {
+                        peerConnections[socket.id].setLocalDescription(desc);
+                        socket.emit('sdp', {
+                            'type': 'offer',
+                            'sdp': desc,
+                            'pc_id': socket.id,
+                            'room_id': room_id, // Send room_id
+                            'username': username
+                        });
+                    });
+
+                    joinedRoom = true; // Set the flag to true since the user joined the room
+                    document.getElementById('room_id').disabled = true; // Disable the room_id input field
+                    document.getElementById('username').disabled = true; // Disable the username input field
+                    document.getElementById('join').disabled = true; // Disable the Join Room button
+                    document.getElementById('leave').disabled = false; // Enable the Leave Room button
+                })
+                .catch(function (err) {
+                    console.log('Error accessing media devices: ', err);
+                });
+        }
+
+        function leaveRoom() {
+            var username = document.getElementById('username').value;
+            var room_id = document.getElementById('room_id').value;
+
+            socket.emit('leave_room', { 'username': username, 'room_id': room_id }); // Send room_id
+
+            if (peerConnections[socket.id]) {
+                peerConnections[socket.id].close();
+                delete peerConnections[socket.id];
+            }
+
+            joinedRoom = false; // Set the flag to false since the user left the room
+            document.getElementById('room_id').disabled = false; // Enable the room_id input field
+            document.getElementById('username').disabled = false; // Enable the username input field
+            document.getElementById('join').disabled = false; // Enable the Join Room button
+            document.getElementById('leave').disabled = true; // Disable the Leave Room button
+            document.getElementById('videos').innerHTML = ''; // Clear the video stream div
+            document.getElementById('active_users').innerHTML = ''; // Clear the active users list
+        }
+
+        socket.on('user_joined', function (data) {
+            var li = document.createElement('li');
+            li.textContent = data.username + ' joined the room.';
+            document.getElementById('active_users').appendChild(li);
+        });
+
+        socket.on('user_left', function (data) {
+            var li = document.createElement('li');
+            li.textContent = data.username + ' left the room.';
+            document.getElementById('active_users').appendChild(li);
+        });
+
+        socket.on('active_users', function (data) {
+            document.getElementById('active_users').innerHTML = '';
+            data.users.forEach(function (user) {
+                var li = document.createElement('li');
+                li.textContent = user;
+                document.getElementById('active_users').appendChild(li);
+            });
+        });
+
+        socket.on('sdp', function (data) {
+            if (data.type === 'candidate') {
+                peerConnections[data.pc_id].addIceCandidate(data.candidate);
+            } else if (data.type === 'offer') {
+                peerConnections[data.pc_id] = new RTCPeerConnection();
+                peerConnections[data.pc_id].addStream(localStream);
+                peerConnections[data.pc_id].setRemoteDescription(new RTCSessionDescription(data.sdp));
+                peerConnections[data.pc_id].createAnswer().then(function (desc) {
+                    peerConnections[data.pc_id].setLocalDescription(desc);
+                    socket.emit('sdp', {
+                        'type': 'answer',
+                        'sdp': desc,
+                        'pc_id': data.pc_id,
+                        'room_id': room_id, // Send room_id
+                        'username': data.username
+                    });
+                });
+
+                peerConnections[data.pc_id].onicecandidate = function (event) {
+                    if (event.candidate) {
+                        socket.emit('sdp', {
+                            'type': 'candidate',
+                            'candidate': event.candidate,
+                            'pc_id': data.pc_id,
+                            'room_id': room_id, // Send room_id
+                            'username': data.username
+                        });
+                    }
+                };
+
+                peerConnections[data.pc_id].onaddstream = function (event) {
+                    var video = document.createElement('video');
+                    video.srcObject = event.stream;
+                    video.play();
+                    document.getElementById('videos').appendChild(video);
+                };
+            } else if (data.type === 'answer') {
+                peerConnections[data.pc_id].setRemoteDescription(new RTCSessionDescription(data.sdp));
+            }
+        });
+    </script>
+</body>
+</html>
